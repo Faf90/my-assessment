@@ -341,9 +341,69 @@ def question_6():
     Null values can be input manually - i.e. values that overflow should loop to the top of each gender.
 
     Also return a result set for this table (ie SELECT * FROM corrected_customers)
+
+    Approach:
+    - Misalignment occured separately in the original male and female tables
+      so every window is partitioned by Gender.
+    - Ages shifted two places upwards so each customer's true age is found 
+      two rows above.
+    - The first two customers of each gender have no row two above. Their
+      true ages are overflowed from the last two rows of that gender. 
+    - Duplicated Ids are removed first as the extra rows would offset the
+      row positions.
     """
 
-    qry = """____________________"""
+    qry = """
+            CREATE OR REPLACE TABLE corrected_customers AS
+
+            -- Remove duplicate customer records
+            WITH unique_customers AS (
+                SELECT DISTINCT CustomerID, Age, Gender
+                FROM customers
+            ),
+
+            -- Get the row number of each customer within their gender
+            -- Get the number of customers in that gender group
+            customer_positions AS (
+                SELECT 
+                    CustomerID,
+                    Age,
+                    Gender,
+                    ROW_NUMBER() OVER (PARTITION BY Gender ORDER BY CustomerID) AS rn,
+                    COUNT(*) OVER (PARTITION BY Gender) AS cnt
+                FROM unique_customers
+            ),
+
+            -- Get the age two rows above
+            -- Get the ages in the last two rows of the gender
+            customers_shifted AS (
+                SELECT 
+                    CustomerID,
+                    Age,
+                    Gender,
+                    rn,
+                    LAG(Age, 2) OVER (PARTITION BY Gender ORDER BY CustomerID) AS LaggedAge,
+                    MAX(CASE WHEN rn = cnt - 1 THEN Age END) OVER (PARTITION BY Gender) AS SecondLastAge,
+                    MAX(CASE WHEN rn = cnt THEN Age END) OVER (PARTITION BY Gender) AS LastAge
+                FROM customer_positions
+            )
+
+            -- Select the correct age for each row
+            SELECT 
+                CustomerID,
+                Age,
+                CASE rn
+                    WHEN 1 THEN SecondLastAge
+                    WHEN 2 THEN LastAge
+                    ELSE LaggedAge
+                END AS CorrectedAge,
+                Gender
+            FROM customers_shifted
+            ORDER BY CustomerID;
+
+            -- Return the result set
+            SELECT * FROM corrected_customers ORDER BY CustomerID
+    """
 
     return qry
 
@@ -362,8 +422,53 @@ def question_7():
     Customers with no repayments should be included as 0 in the result.
 
     Return columns: `CustomerID`, `Age`, `CorrectedAge`, `Gender`, `AgeCategory`, `Rank`
+
+    Approach:
+    - The AgeCategory column is added with IF NOT EXISTS which allows the query to be 
+      executed more than once safely.
+    - Repayments are counted per customer by counting DISTINCT RepaymentIDs. 
+    - LEFT JOIN is used so customers with no repayments are kep and given a 
+      count of 0.
+    - Customers are ranked within their age group by total repyaments
+      using DENSE_RANK which does not skip numbers after ties. 
     """
 
-    qry = """____________________"""
+    qry = """
+        -- Add and popualte the AgeCategory column
+        ALTER TABLE corrected_customers ADD COLUMN IF NOT EXISTS AgeCategory VARCHAR;
+        
+        UPDATE corrected_customers
+        SET AgeCategory = CASE
+            WHEN CorrectedAge < 20 THEN 'Teen'
+            WHEN CorrectedAge < 30 THEN 'Young Adult'
+            WHEN CorrectedAge < 60 THEN 'Adult'
+            ELSE 'Pensioner'
+        END;
+
+        -- Get the total number of repayments per customer
+        WITH customer_repayments AS (
+            SELECT
+                CustomerID,
+                COUNT(DISTINCT RepaymentID) AS TotalPaymentsPerCustomer
+            FROM repayments
+            GROUP BY CustomerID
+        )
+
+        -- Rank customers within their age group by total repayments.
+        SELECT 
+            cc.CustomerID,
+            cc.Age,
+            cc.CorrectedAge,
+            cc.Gender,
+            cc.AgeCategory,
+            DENSE_RANK() OVER (
+                PARTITION BY cc.AgeCategory
+                ORDER BY COALESCE(cr.TotalPaymentsPerCustomer, 0) DESC
+            ) AS "Rank"
+        FROM corrected_customers cc
+        LEFT JOIN customer_repayments cr
+            ON cc.CustomerID = cr.CustomerID
+        ORDER BY cc.AgeCategory, "Rank", cc.CustomerID;
+    """
 
     return qry
